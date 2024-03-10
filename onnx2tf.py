@@ -1229,7 +1229,7 @@ def convert(
             tf.lite.OpsSet.SELECT_TF_OPS,
         ]
         converter._experimental_disable_batchmatmul_unfold = not enable_batchmatmul_unfold
-        if not only_fp16 and not only_int8:
+        if only_fp32:
             tflite_model = converter.convert()
             with open(f'{output_folder_path}/{output_file_name}_float32.tflite', 'wb') as w:
                 w.write(tflite_model)
@@ -1247,7 +1247,7 @@ def convert(
                 )
             info(Color.GREEN(f'Float32 tflite output complete!'))
 
-        if not only_fp32 and not only_int8:
+        if only_fp16:
             converter.optimizations = [tf.lite.Optimize.DEFAULT]
             converter.target_spec.supported_types = [tf.float16]
             converter.target_spec.supported_ops = [
@@ -1288,262 +1288,263 @@ def convert(
                 )
 
         # Quantized TFLite
-        MEAN = np.asarray([[[[0.485, 0.456, 0.406]]]], dtype=np.float32)
-        STD = np.asarray([[[[0.229, 0.224, 0.225]]]], dtype=np.float32)
-        if output_integer_quantized_tflite:
-            # Get signatures/input keys
-            loaded_saved_model = tf.saved_model.load(
-                output_folder_path
-            ).signatures[SIGNATURE_KEY]
-            input_keys = list(loaded_saved_model.structured_input_signature[1].keys())
-            input_shapes = [v.shape for v in loaded_saved_model.structured_input_signature[1].values()]
-            input_dtypes = [v.dtype for v in loaded_saved_model.structured_input_signature[1].values()]
-            info(Color.BLUE(f'Input signature information for quantization'))
-            info(Color.BLUE(f'signature_name') + f': {SIGNATURE_KEY}')
-            for idx, (input_key, input_shape, input_dtype) in enumerate(zip(input_keys, input_shapes, input_dtypes)):
-                info(
-                    Color.BLUE(f'input_name.{idx}') + f': {input_key} '+
-                    Color.BLUE(f'shape') + f': {input_shape} '+
-                    Color.BLUE(f'dtype') + f': {input_dtype}'
-                )
+        if only_int8:
+            MEAN = np.asarray([[[[0.485, 0.456, 0.406]]]], dtype=np.float32)
+            STD = np.asarray([[[[0.229, 0.224, 0.225]]]], dtype=np.float32)
+            if output_integer_quantized_tflite:
+                # Get signatures/input keys
+                loaded_saved_model = tf.saved_model.load(
+                    output_folder_path
+                ).signatures[SIGNATURE_KEY]
+                input_keys = list(loaded_saved_model.structured_input_signature[1].keys())
+                input_shapes = [v.shape for v in loaded_saved_model.structured_input_signature[1].values()]
+                input_dtypes = [v.dtype for v in loaded_saved_model.structured_input_signature[1].values()]
+                info(Color.BLUE(f'Input signature information for quantization'))
+                info(Color.BLUE(f'signature_name') + f': {SIGNATURE_KEY}')
+                for idx, (input_key, input_shape, input_dtype) in enumerate(zip(input_keys, input_shapes, input_dtypes)):
+                    info(
+                        Color.BLUE(f'input_name.{idx}') + f': {input_key} '+
+                        Color.BLUE(f'shape') + f': {input_shape} '+
+                        Color.BLUE(f'dtype') + f': {input_dtype}'
+                    )
 
-            # INT8 Converter
-            converter = tf.lite.TFLiteConverter.from_saved_model(
-                output_folder_path,
-            )
-            # Dynamic Range Quantization
-            try:
-                converter.optimizations = [tf.lite.Optimize.DEFAULT]
-                converter.target_spec.supported_types = []
-                converter.target_spec.supported_ops = [
-                    tf.lite.OpsSet.TFLITE_BUILTINS,
-                    tf.lite.OpsSet.SELECT_TF_OPS,
+                # INT8 Converter
+                converter = tf.lite.TFLiteConverter.from_saved_model(
+                    output_folder_path,
+                )
+                # Dynamic Range Quantization
+                try:
+                    converter.optimizations = [tf.lite.Optimize.DEFAULT]
+                    converter.target_spec.supported_types = []
+                    converter.target_spec.supported_ops = [
+                        tf.lite.OpsSet.TFLITE_BUILTINS,
+                        tf.lite.OpsSet.SELECT_TF_OPS,
+                    ]
+                    converter._experimental_disable_per_channel = disable_per_channel
+                    converter._experimental_disable_batchmatmul_unfold = not enable_batchmatmul_unfold
+                    tflite_model = converter.convert()
+                    with open(f'{output_folder_path}/{output_file_name}_dynamic_range_quant.tflite', 'wb') as w:
+                        w.write(tflite_model)
+                    if copy_onnx_input_output_names_to_tflite:
+                        rewrite_tflite_inout_opname(
+                            output_folder_path=output_folder_path,
+                            tflite_file_name=f'{output_file_name}_dynamic_range_quant.tflite',
+                            onnx_input_names=onnx_graph_input_names,
+                            onnx_output_names=onnx_graph_output_names,
+                        )
+                    if output_weights:
+                        weights_export(
+                            extract_target_tflite_file_path=f'{output_folder_path}/{output_file_name}_dynamic_range_quant.tflite',
+                            output_weights_file_path=f'{output_folder_path}/{output_file_name}_dynamic_range_quant_weights.h5',
+                        )
+                    info(Color.GREEN(f'Dynamic Range Quantization tflite output complete!'))
+                except RuntimeError as ex:
+                    import traceback
+                    warn(traceback.format_exc(), prefix=False)
+                    warn(
+                        'Dynamic Range Quantization tflite output failed.'
+                    )
+
+                # Download sample calibration data - MS-COCO x20 images
+                # Used only when there is only one input OP, a 4D tensor image,
+                # and --quant_calib_input_op_name_np_data_path is not specified.
+                # Otherwise, calibrate using the data specified in --quant_calib_input_op_name_np_data_path.
+                calib_data_dict = {}
+                model_input_name_list = [
+                    model_input.name for model_input in model.inputs
                 ]
-                converter._experimental_disable_per_channel = disable_per_channel
-                converter._experimental_disable_batchmatmul_unfold = not enable_batchmatmul_unfold
-                tflite_model = converter.convert()
-                with open(f'{output_folder_path}/{output_file_name}_dynamic_range_quant.tflite', 'wb') as w:
-                    w.write(tflite_model)
-                if copy_onnx_input_output_names_to_tflite:
-                    rewrite_tflite_inout_opname(
-                        output_folder_path=output_folder_path,
-                        tflite_file_name=f'{output_file_name}_dynamic_range_quant.tflite',
-                        onnx_input_names=onnx_graph_input_names,
-                        onnx_output_names=onnx_graph_output_names,
-                    )
-                if output_weights:
-                    weights_export(
-                        extract_target_tflite_file_path=f'{output_folder_path}/{output_file_name}_dynamic_range_quant.tflite',
-                        output_weights_file_path=f'{output_folder_path}/{output_file_name}_dynamic_range_quant_weights.h5',
-                    )
-                info(Color.GREEN(f'Dynamic Range Quantization tflite output complete!'))
-            except RuntimeError as ex:
-                import traceback
-                warn(traceback.format_exc(), prefix=False)
-                warn(
-                    'Dynamic Range Quantization tflite output failed.'
-                )
+                data_count = 0
+                if custom_input_op_name_np_data_path is None \
+                    and model.inputs[0].dtype == tf.float32 \
+                    and len(model.inputs[0].shape) == 4:
 
-            # Download sample calibration data - MS-COCO x20 images
-            # Used only when there is only one input OP, a 4D tensor image,
-            # and --quant_calib_input_op_name_np_data_path is not specified.
-            # Otherwise, calibrate using the data specified in --quant_calib_input_op_name_np_data_path.
-            calib_data_dict = {}
-            model_input_name_list = [
-                model_input.name for model_input in model.inputs
-            ]
-            data_count = 0
-            if custom_input_op_name_np_data_path is None \
-                and model.inputs[0].dtype == tf.float32 \
-                and len(model.inputs[0].shape) == 4:
-
-                # AUTO calib 4D images
-                calib_data: np.ndarray = download_test_image_data()
-                data_count = calib_data.shape[0]
-                for model_input in model.inputs:
-                    if model_input.dtype != tf.float32 \
-                        or len(model_input.shape) != 4 \
-                        or model_input.shape[-1] != 3:
-                        error(
-                            f'For models that have multiple input OPs and need to perform INT8 quantization calibration '+
-                            f'using non-rgb-image input tensors, specify the calibration data with '+
-                            f'--quant_calib_input_op_name_np_data_path. '+
-                            f'model_input[n].shape: {model_input.shape}'
-                        )
-                        sys.exit(1)
-
-                    calib_data_dict[model_input.name] = \
-                        [
-                            tf.image.resize(
-                                calib_data.copy(),
-                                (model_input.shape[1], model_input.shape[2])
-                            ),
-                            MEAN,
-                            STD,
-                        ]
-            elif custom_input_op_name_np_data_path is not None:
-                for param in custom_input_op_name_np_data_path:
-                    if len(param) != 4:
-                        error(
-                            "If you want to use custom input with the '-oiqt' option, " +
-                            "{input_op_name}, {numpy_file_path}, {mean}, and {std} must all be entered. " +
-                            f"However, you have only entered {len(param)} options. "
-                        )
-                        sys.exit(1)
-
-                    input_op_name = str(param[0])
-                    numpy_file_path = str(param[1])
-                    calib_data = np.load(numpy_file_path)
+                    # AUTO calib 4D images
+                    calib_data: np.ndarray = download_test_image_data()
                     data_count = calib_data.shape[0]
-                    mean = param[2]
-                    std = param[3]
+                    for model_input in model.inputs:
+                        if model_input.dtype != tf.float32 \
+                            or len(model_input.shape) != 4 \
+                            or model_input.shape[-1] != 3:
+                            error(
+                                f'For models that have multiple input OPs and need to perform INT8 quantization calibration '+
+                                f'using non-rgb-image input tensors, specify the calibration data with '+
+                                f'--quant_calib_input_op_name_np_data_path. '+
+                                f'model_input[n].shape: {model_input.shape}'
+                            )
+                            sys.exit(1)
 
-                    calib_data_dict[input_op_name] = \
-                        [
-                            calib_data.copy(),
-                            mean,
-                            std,
-                        ]
+                        calib_data_dict[model_input.name] = \
+                            [
+                                tf.image.resize(
+                                    calib_data.copy(),
+                                    (model_input.shape[1], model_input.shape[2])
+                                ),
+                                MEAN,
+                                STD,
+                            ]
+                elif custom_input_op_name_np_data_path is not None:
+                    for param in custom_input_op_name_np_data_path:
+                        if len(param) != 4:
+                            error(
+                                "If you want to use custom input with the '-oiqt' option, " +
+                                "{input_op_name}, {numpy_file_path}, {mean}, and {std} must all be entered. " +
+                                f"However, you have only entered {len(param)} options. "
+                            )
+                            sys.exit(1)
 
-            # representative_dataset_gen
-            def representative_dataset_gen():
-                for idx in range(data_count):
-                    yield_data_dict = {}
-                    for model_input_name in model_input_name_list:
-                        calib_data, mean, std = calib_data_dict[model_input_name]
-                        normalized_calib_data = (calib_data[idx] - mean) / std
-                        yield_data_dict[model_input_name] = normalized_calib_data
-                    yield yield_data_dict
+                        input_op_name = str(param[0])
+                        numpy_file_path = str(param[1])
+                        calib_data = np.load(numpy_file_path)
+                        data_count = calib_data.shape[0]
+                        mean = param[2]
+                        std = param[3]
 
-            # INT8 Quantization
-            try:
-                converter.optimizations = [tf.lite.Optimize.DEFAULT]
-                converter.target_spec.supported_ops = [
-                    tf.lite.OpsSet.TFLITE_BUILTINS_INT8,
-                    tf.lite.OpsSet.SELECT_TF_OPS,
-                ]
-                converter._experimental_disable_per_channel = disable_per_channel
-                converter._experimental_disable_batchmatmul_unfold = not enable_batchmatmul_unfold
-                converter.representative_dataset = representative_dataset_gen
-                tflite_model = converter.convert()
-                with open(f'{output_folder_path}/{output_file_name}_integer_quant.tflite', 'wb') as w:
-                    w.write(tflite_model)
-                if copy_onnx_input_output_names_to_tflite:
-                    rewrite_tflite_inout_opname(
-                        output_folder_path=output_folder_path,
-                        tflite_file_name=f'{output_file_name}_integer_quant.tflite',
-                        onnx_input_names=onnx_graph_input_names,
-                        onnx_output_names=onnx_graph_output_names,
-                    )
-                if output_weights:
-                    weights_export(
-                        extract_target_tflite_file_path=f'{output_folder_path}/{output_file_name}_integer_quant.tflite',
-                        output_weights_file_path=f'{output_folder_path}/{output_file_name}_integer_quant_weights.h5',
-                    )
-                info(Color.GREEN(f'INT8 Quantization tflite output complete!'))
+                        calib_data_dict[input_op_name] = \
+                            [
+                                calib_data.copy(),
+                                mean,
+                                std,
+                            ]
 
-                # Full Integer Quantization
-                converter.optimizations = [tf.lite.Optimize.DEFAULT]
-                converter.target_spec.supported_ops = [
-                    tf.lite.OpsSet.TFLITE_BUILTINS_INT8,
-                    tf.lite.OpsSet.SELECT_TF_OPS,
-                ]
-                converter._experimental_disable_per_channel = disable_per_channel
-                converter._experimental_disable_batchmatmul_unfold = not enable_batchmatmul_unfold
-                converter.representative_dataset = representative_dataset_gen
-                inf_type = None
-                if input_output_quant_dtype == 'int8':
-                    inf_type = tf.int8
-                elif input_output_quant_dtype == 'uint8':
-                    inf_type = tf.uint8
-                else:
-                    inf_type = tf.int8
-                converter.inference_input_type = inf_type
-                converter.inference_output_type = inf_type
-                tflite_model = converter.convert()
-                with open(f'{output_folder_path}/{output_file_name}_full_integer_quant.tflite', 'wb') as w:
-                    w.write(tflite_model)
-                if copy_onnx_input_output_names_to_tflite:
-                    rewrite_tflite_inout_opname(
-                        output_folder_path=output_folder_path,
-                        tflite_file_name=f'{output_file_name}_full_integer_quant.tflite',
-                        onnx_input_names=onnx_graph_input_names,
-                        onnx_output_names=onnx_graph_output_names,
-                    )
-                if output_weights:
-                    weights_export(
-                        extract_target_tflite_file_path=f'{output_folder_path}/{output_file_name}_full_integer_quant.tflite',
-                        output_weights_file_path=f'{output_folder_path}/{output_file_name}_full_integer_quant_weights.h5',
-                    )
-                info(Color.GREEN(f'Full INT8 Quantization tflite output complete!'))
-            except RuntimeError as ex:
-                import traceback
-                warn(traceback.format_exc(), prefix=False)
-                warn(
-                    'Full INT8 Quantization tflite output failed.'
-                )
+                # representative_dataset_gen
+                def representative_dataset_gen():
+                    for idx in range(data_count):
+                        yield_data_dict = {}
+                        for model_input_name in model_input_name_list:
+                            calib_data, mean, std = calib_data_dict[model_input_name]
+                            normalized_calib_data = (calib_data[idx] - mean) / std
+                            yield_data_dict[model_input_name] = normalized_calib_data
+                        yield yield_data_dict
 
-            # Integer quantization with int16 activations
-            try:
-                converter.optimizations = [tf.lite.Optimize.DEFAULT]
-                converter.target_spec.supported_types = []
-                converter.target_spec.supported_ops = [
-                    tf.lite.OpsSet.EXPERIMENTAL_TFLITE_BUILTINS_ACTIVATIONS_INT16_WEIGHTS_INT8,
-                    tf.lite.OpsSet.SELECT_TF_OPS,
-                ]
-                converter._experimental_disable_per_channel = disable_per_channel
-                converter._experimental_disable_batchmatmul_unfold = not enable_batchmatmul_unfold
-                converter.representative_dataset = representative_dataset_gen
-                converter.inference_input_type = tf.float32
-                converter.inference_output_type = tf.float32
-                tflite_model = converter.convert()
-                with open(f'{output_folder_path}/{output_file_name}_integer_quant_with_int16_act.tflite', 'wb') as w:
-                    w.write(tflite_model)
-                if copy_onnx_input_output_names_to_tflite:
-                    rewrite_tflite_inout_opname(
-                        output_folder_path=output_folder_path,
-                        tflite_file_name=f'{output_file_name}_integer_quant_with_int16_act.tflite',
-                        onnx_input_names=onnx_graph_input_names,
-                        onnx_output_names=onnx_graph_output_names,
-                    )
-                info(Color.GREEN(f'INT8 Quantization with int16 activations tflite output complete!'))
-            except RuntimeError as ex:
-                import traceback
-                warn(traceback.format_exc(), prefix=False)
-                warn(
-                    'INT8 Quantization with int16 activations tflite output failed.'
-                )
+                # INT8 Quantization
+                try:
+                    converter.optimizations = [tf.lite.Optimize.DEFAULT]
+                    converter.target_spec.supported_ops = [
+                        tf.lite.OpsSet.TFLITE_BUILTINS_INT8,
+                        tf.lite.OpsSet.SELECT_TF_OPS,
+                    ]
+                    converter._experimental_disable_per_channel = disable_per_channel
+                    converter._experimental_disable_batchmatmul_unfold = not enable_batchmatmul_unfold
+                    converter.representative_dataset = representative_dataset_gen
+                    tflite_model = converter.convert()
+                    with open(f'{output_folder_path}/{output_file_name}_integer_quant.tflite', 'wb') as w:
+                        w.write(tflite_model)
+                    if copy_onnx_input_output_names_to_tflite:
+                        rewrite_tflite_inout_opname(
+                            output_folder_path=output_folder_path,
+                            tflite_file_name=f'{output_file_name}_integer_quant.tflite',
+                            onnx_input_names=onnx_graph_input_names,
+                            onnx_output_names=onnx_graph_output_names,
+                        )
+                    if output_weights:
+                        weights_export(
+                            extract_target_tflite_file_path=f'{output_folder_path}/{output_file_name}_integer_quant.tflite',
+                            output_weights_file_path=f'{output_folder_path}/{output_file_name}_integer_quant_weights.h5',
+                        )
+                    info(Color.GREEN(f'INT8 Quantization tflite output complete!'))
 
-            # Full Integer quantization with int16 activations
-            try:
-                converter.optimizations = [tf.lite.Optimize.DEFAULT]
-                converter.target_spec.supported_types = []
-                converter.target_spec.supported_ops = [
-                    tf.lite.OpsSet.EXPERIMENTAL_TFLITE_BUILTINS_ACTIVATIONS_INT16_WEIGHTS_INT8,
-                    tf.lite.OpsSet.SELECT_TF_OPS,
-                ]
-                converter._experimental_disable_per_channel = disable_per_channel
-                converter._experimental_disable_batchmatmul_unfold = not enable_batchmatmul_unfold
-                converter.representative_dataset = representative_dataset_gen
-                converter.inference_input_type = tf.int16
-                converter.inference_output_type = tf.int16
-                tflite_model = converter.convert()
-                with open(f'{output_folder_path}/{output_file_name}_full_integer_quant_with_int16_act.tflite', 'wb') as w:
-                    w.write(tflite_model)
-                if copy_onnx_input_output_names_to_tflite:
-                    rewrite_tflite_inout_opname(
-                        output_folder_path=output_folder_path,
-                        tflite_file_name=f'{output_file_name}_full_integer_quant_with_int16_act.tflite',
-                        onnx_input_names=onnx_graph_input_names,
-                        onnx_output_names=onnx_graph_output_names,
+                    # Full Integer Quantization
+                    converter.optimizations = [tf.lite.Optimize.DEFAULT]
+                    converter.target_spec.supported_ops = [
+                        tf.lite.OpsSet.TFLITE_BUILTINS_INT8,
+                        tf.lite.OpsSet.SELECT_TF_OPS,
+                    ]
+                    converter._experimental_disable_per_channel = disable_per_channel
+                    converter._experimental_disable_batchmatmul_unfold = not enable_batchmatmul_unfold
+                    converter.representative_dataset = representative_dataset_gen
+                    inf_type = None
+                    if input_output_quant_dtype == 'int8':
+                        inf_type = tf.int8
+                    elif input_output_quant_dtype == 'uint8':
+                        inf_type = tf.uint8
+                    else:
+                        inf_type = tf.int8
+                    converter.inference_input_type = inf_type
+                    converter.inference_output_type = inf_type
+                    tflite_model = converter.convert()
+                    with open(f'{output_folder_path}/{output_file_name}_full_integer_quant.tflite', 'wb') as w:
+                        w.write(tflite_model)
+                    if copy_onnx_input_output_names_to_tflite:
+                        rewrite_tflite_inout_opname(
+                            output_folder_path=output_folder_path,
+                            tflite_file_name=f'{output_file_name}_full_integer_quant.tflite',
+                            onnx_input_names=onnx_graph_input_names,
+                            onnx_output_names=onnx_graph_output_names,
+                        )
+                    if output_weights:
+                        weights_export(
+                            extract_target_tflite_file_path=f'{output_folder_path}/{output_file_name}_full_integer_quant.tflite',
+                            output_weights_file_path=f'{output_folder_path}/{output_file_name}_full_integer_quant_weights.h5',
+                        )
+                    info(Color.GREEN(f'Full INT8 Quantization tflite output complete!'))
+                except RuntimeError as ex:
+                    import traceback
+                    warn(traceback.format_exc(), prefix=False)
+                    warn(
+                        'Full INT8 Quantization tflite output failed.'
                     )
-                info(Color.GREEN(f'Full INT8 Quantization with int16 activations tflite output complete!'))
-            except RuntimeError as ex:
-                import traceback
-                warn(traceback.format_exc(), prefix=False)
-                warn(
-                    'Full INT8 Quantization with int16 activations tflite output failed.'
-                )
+
+                # Integer quantization with int16 activations
+                try:
+                    converter.optimizations = [tf.lite.Optimize.DEFAULT]
+                    converter.target_spec.supported_types = []
+                    converter.target_spec.supported_ops = [
+                        tf.lite.OpsSet.EXPERIMENTAL_TFLITE_BUILTINS_ACTIVATIONS_INT16_WEIGHTS_INT8,
+                        tf.lite.OpsSet.SELECT_TF_OPS,
+                    ]
+                    converter._experimental_disable_per_channel = disable_per_channel
+                    converter._experimental_disable_batchmatmul_unfold = not enable_batchmatmul_unfold
+                    converter.representative_dataset = representative_dataset_gen
+                    converter.inference_input_type = tf.float32
+                    converter.inference_output_type = tf.float32
+                    tflite_model = converter.convert()
+                    with open(f'{output_folder_path}/{output_file_name}_integer_quant_with_int16_act.tflite', 'wb') as w:
+                        w.write(tflite_model)
+                    if copy_onnx_input_output_names_to_tflite:
+                        rewrite_tflite_inout_opname(
+                            output_folder_path=output_folder_path,
+                            tflite_file_name=f'{output_file_name}_integer_quant_with_int16_act.tflite',
+                            onnx_input_names=onnx_graph_input_names,
+                            onnx_output_names=onnx_graph_output_names,
+                        )
+                    info(Color.GREEN(f'INT8 Quantization with int16 activations tflite output complete!'))
+                except RuntimeError as ex:
+                    import traceback
+                    warn(traceback.format_exc(), prefix=False)
+                    warn(
+                        'INT8 Quantization with int16 activations tflite output failed.'
+                    )
+
+                # Full Integer quantization with int16 activations
+                try:
+                    converter.optimizations = [tf.lite.Optimize.DEFAULT]
+                    converter.target_spec.supported_types = []
+                    converter.target_spec.supported_ops = [
+                        tf.lite.OpsSet.EXPERIMENTAL_TFLITE_BUILTINS_ACTIVATIONS_INT16_WEIGHTS_INT8,
+                        tf.lite.OpsSet.SELECT_TF_OPS,
+                    ]
+                    converter._experimental_disable_per_channel = disable_per_channel
+                    converter._experimental_disable_batchmatmul_unfold = not enable_batchmatmul_unfold
+                    converter.representative_dataset = representative_dataset_gen
+                    converter.inference_input_type = tf.int16
+                    converter.inference_output_type = tf.int16
+                    tflite_model = converter.convert()
+                    with open(f'{output_folder_path}/{output_file_name}_full_integer_quant_with_int16_act.tflite', 'wb') as w:
+                        w.write(tflite_model)
+                    if copy_onnx_input_output_names_to_tflite:
+                        rewrite_tflite_inout_opname(
+                            output_folder_path=output_folder_path,
+                            tflite_file_name=f'{output_file_name}_full_integer_quant_with_int16_act.tflite',
+                            onnx_input_names=onnx_graph_input_names,
+                            onnx_output_names=onnx_graph_output_names,
+                        )
+                    info(Color.GREEN(f'Full INT8 Quantization with int16 activations tflite output complete!'))
+                except RuntimeError as ex:
+                    import traceback
+                    warn(traceback.format_exc(), prefix=False)
+                    warn(
+                        'Full INT8 Quantization with int16 activations tflite output failed.'
+                    )
 
         # Returns true if the two arrays, the output of onnx and the output of TF,
         # are elementwise equal within an acceptable range.
